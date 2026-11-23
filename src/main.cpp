@@ -192,6 +192,14 @@ void loop() {
     return;
   }
 
+  static uint32_t lastBeat = 0;
+  bool advertising = NimBLEDevice::getAdvertising()->isAdvertising();
+  if (millis() - lastBeat > 5000) {
+    lastBeat = millis();
+    Serial.printf("status: module=%d advertising=%d phone=%d\n", (int)realUp, (int)advertising, (int)phoneUp);
+  }
+  if (!phoneUp && !advertising) needAdvert = true;
+
   if (needAdvert && !phoneUp) {
     needAdvert = false;
     startAdvertising();
