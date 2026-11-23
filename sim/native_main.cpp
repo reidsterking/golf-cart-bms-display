@@ -51,10 +51,10 @@ int main(int argc, char **argv) {
   lv_disp_drv_register(&drv);
   ui_init();
 
-  const char *names[] = {"driving", "charging", "alarm", "offline"};
+  const char *names[] = {"driving", "charging", "alarm", "offline", "realnow"};
   const char *pages[] = {"overview", "power", "alerts"};
   uint32_t now = 1000;
-  for (int sc = 0; sc < 4; sc++) {
+  for (int sc = 0; sc < 5; sc++) {
     Snapshot s;
     sim_scenario(s, sc);
     Alerts al;
@@ -69,11 +69,29 @@ int main(int argc, char **argv) {
     }
     alerts_eval(s, al, now);
     ui_update(s, al);
+    printf("scenario %-9s alerts=%d -> auto page after update: %d\n", names[sc], al.count, ui_page());
+    settle();
+    dump(out + "/" + names[sc] + "_auto.ppm");
     for (int p = 0; p < 3; p++) {
       ui_goto(p);
       ui_update(s, al);
       settle();
       dump(out + "/" + names[sc] + "_" + pages[p] + ".ppm");
+    }
+    if (al.count > 0) {
+      // flash phase B, then silence the first alert and check it stops flashing
+      ui_goto(PAGE_ALERTS);
+      lv_tick_inc(500);
+      lv_timer_handler();
+      dump(out + "/" + names[sc] + "_alerts_flashB.ppm");
+      ui_ack_row(0);
+      lv_tick_inc(500);
+      lv_timer_handler();
+      dump(out + "/" + names[sc] + "_alerts_acked0.ppm");
+      // staying on another page must hold: a repeat update with the same alerts must not yank us back
+      ui_goto(PAGE_POWER);
+      ui_update(s, al);
+      printf("   after update with unchanged alerts, page stays: %d (expect 1)\n", ui_page());
     }
   }
   return 0;

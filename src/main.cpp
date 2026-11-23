@@ -1,11 +1,12 @@
 // Golf cart battery dashboard for the ESP32 Cheap Yellow Display (ESP32-2432S028R).
-// Data currently comes from the simulator; the Bluetooth source replaces it later.
+// Default build reads the real batteries over Bluetooth. Build env "cyd-demo" uses fake data.
 #include <Arduino.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <lvgl.h>
 #include "model.h"
+#include "ble_source.h"
 #include "sim_source.h"
 #include "ui/ui.h"
 
@@ -74,6 +75,9 @@ void setup() {
   lv_indev_drv_register(&indevDrv);
 
   ui_init();
+#ifndef DEMO_DATA
+  ble_start();
+#endif
 }
 
 void loop() {
@@ -83,7 +87,11 @@ void loop() {
     lastData = now;
     static Snapshot snap;
     static Alerts alerts;
-    sim_step(snap, now);
+#ifdef DEMO_DATA
+    sim_step(snap, now);  // fake numbers, labeled DEMO DATA on screen
+#else
+    ble_snapshot(snap);   // real batteries only
+#endif
     alerts_eval(snap, alerts, now);
     ui_update(snap, alerts);
   }

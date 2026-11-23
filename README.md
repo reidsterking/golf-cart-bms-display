@@ -9,12 +9,14 @@ The batteries' Bluetooth modules advertise as `GC2RB<serial>`.
 | --- | --- |
 | Dashboard UI (overview, power graph, alerts) | Built, verified in the desktop renderer and compiles for the board. Not yet run on hardware. |
 | Alert engine (debounced, hysteresis) | Built, placeholder thresholds |
-| Battery data over Bluetooth | Blocked: the module only answers after the official app sends a request, and that request is not known yet. The dashboard currently runs on simulated data. |
+| Bluetooth link to both modules | Built (read-only, remembers which serial is battery 1 and 2). Not yet run on hardware inside the dashboard. |
+| Decoding battery readings | Blocked: the module only answers after the official app sends a request, and that request is not known yet. The default build therefore shows `--` and "no readings" alerts, never fake numbers. |
 
 ## Environments
 
 ```bash
-pio run -e cyd -t upload     # dashboard on the board (simulated data for now)
+pio run -e cyd -t upload       # dashboard, REAL battery data only
+pio run -e cyd-demo -t upload  # same UI with fake data, labeled DEMO DATA on screen
 pio run -e proxy -t upload   # BLE protocol logger, see tools/proxy
 pio run -e native            # desktop build that renders the UI to images
 ```
