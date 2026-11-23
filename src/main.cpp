@@ -1,44 +1,86 @@
-// BLE protocol explorer. Lists the strongest nearby devices with full advertising
-// details, and connects to any whose name contains one of the match strings.
+// BLE man-in-the-middle logger for the GC2RB battery Bluetooth module.
+//
+// The board connects to the real module as a BLE client, then advertises a clone
+// (same name, same 0xFFE0 service) so the official phone app connects to the board
+// instead. Every write the app makes and every notification the module sends is
+// forwarded and logged over serial. That log is the protocol.
+//
+// Nothing is written to the module except what the official app itself writes.
+// The TI firmware-update service (f000ffc0) is deliberately not mirrored.
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <algorithm>
-#include <vector>
 
-static const char *MATCHES[] = {"asgc2rb", "gc2rb"};  // lower case, substring match
-static const uint32_t SCAN_SECONDS = 10;
-static const int SHOW_MIN_RSSI = -85;
-static std::vector<NimBLEClient *> clients;
+static const char *MATCHES[] = {"asgc2rb", "gc2rb"};  // lower case substring match
+static const uint16_t SVC_UUID = 0xFFE0;
+static const int NCHAR = 6;  // 0xFFE1 .. 0xFFE6
 
-static void printHex(const uint8_t *d, size_t n) {
-  for (size_t i = 0; i < n; i++) Serial.printf("%02X ", d[i]);
+struct Msg {
+  uint8_t dir;  // 0 = app to module (write), 1 = module to app (notify), 2 = app read
+  uint8_t idx;  // 1..6 for FFE1..FFE6
+  uint16_t len;
+  uint8_t data[244];
+};
+
+static QueueHandle_t q;
+static NimBLEServer *server;
+static NimBLEClient *real = nullptr;
+static NimBLERemoteCharacteristic *rc[NCHAR + 1];
+static NimBLECharacteristic *cc[NCHAR + 1];
+static volatile bool realUp = false;
+static volatile bool needAdvert = false;
+static volatile bool phoneUp = false;
+static std::string realName;
+static std::string realMfg;
+
+static void printHex(const uint8_t *d, size_t n, size_t maxn = 64) {
+  for (size_t i = 0; i < n && i < maxn; i++) Serial.printf("%02X ", d[i]);
+  if (n > maxn) Serial.print("...");
 }
 
-static void onNotify(NimBLERemoteCharacteristic *c, uint8_t *d, size_t n, bool notify) {
-  Serial.printf("[%10lu] %s %s %s len=%u: ", millis(),
-                c->getRemoteService()->getClient()->getPeerAddress().toString().c_str(),
-                notify ? "NOTIFY" : "INDICATE", c->getUUID().toString().c_str(), (unsigned)n);
-  printHex(d, n);
-  Serial.println();
+static void enqueue(uint8_t dir, uint8_t idx, const uint8_t *d, size_t n) {
+  Msg m;
+  m.dir = dir;
+  m.idx = idx;
+  m.len = n > sizeof(m.data) ? sizeof(m.data) : n;
+  if (m.len) memcpy(m.data, d, m.len);
+  xQueueSend(q, &m, 0);
 }
 
-static void dumpAndSubscribe(NimBLEClient *client) {
-  for (auto *svc : *client->getServices(true)) {
-    Serial.printf("  SERVICE %s\n", svc->getUUID().toString().c_str());
-    for (auto *c : *svc->getCharacteristics(true)) {
-      Serial.printf("    CHAR %s props:%s%s%s%s%s\n", c->getUUID().toString().c_str(),
-                    c->canRead() ? " read" : "", c->canWrite() ? " write" : "",
-                    c->canWriteNoResponse() ? " writeNR" : "", c->canNotify() ? " notify" : "",
-                    c->canIndicate() ? " indicate" : "");
-      if (c->canRead()) {
-        std::string v = c->readValue();
-        Serial.print("      value: ");
-        printHex((const uint8_t *)v.data(), v.size());
-        Serial.println();
-      }
-      if (c->canNotify() || c->canIndicate()) c->subscribe(c->canNotify(), onNotify);
-    }
+static int idxOf(NimBLECharacteristic *c) {
+  for (int i = 1; i <= NCHAR; i++) if (cc[i] == c) return i;
+  return 0;
+}
+static int idxOf(NimBLERemoteCharacteristic *c) {
+  for (int i = 1; i <= NCHAR; i++) if (rc[i] == c) return i;
+  return 0;
+}
+
+class CharCb : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *c) override {
+    std::string v = c->getValue();
+    enqueue(0, idxOf(c), (const uint8_t *)v.data(), v.size());
   }
+  void onRead(NimBLECharacteristic *c) override { enqueue(2, idxOf(c), nullptr, 0); }
+};
+static CharCb charCb;
+
+class SrvCb : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *) override { phoneUp = true; }
+  void onDisconnect(NimBLEServer *) override {
+    phoneUp = false;
+    needAdvert = true;
+  }
+};
+static SrvCb srvCb;
+
+class CliCb : public NimBLEClientCallbacks {
+  void onDisconnect(NimBLEClient *) override { realUp = false; }
+};
+static CliCb cliCb;
+
+static void onNotify(NimBLERemoteCharacteristic *c, uint8_t *d, size_t n, bool) {
+  enqueue(1, idxOf(c), d, n);
 }
 
 static bool matches(std::string name) {
@@ -47,65 +89,129 @@ static bool matches(std::string name) {
   return false;
 }
 
+static void startAdvertising() {
+  NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  NimBLEAdvertisementData ad;
+  ad.setFlags(0x06);
+  ad.setCompleteServices(NimBLEUUID(SVC_UUID));
+  ad.setName(realName);
+  adv->setAdvertisementData(ad);
+  if (!realMfg.empty()) {
+    NimBLEAdvertisementData sr;
+    sr.setManufacturerData(realMfg);
+    adv->setScanResponseData(sr);
+  }
+  adv->start();
+  Serial.printf("ADVERTISING clone '%s'. Open the official app now.\n", realName.c_str());
+}
+
+static bool connectReal() {
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->setActiveScan(true);
+  Serial.println("Scanning for module...");
+  NimBLEScanResults res = scan->start(6, false);
+  for (int i = 0; i < res.getCount(); i++) {
+    NimBLEAdvertisedDevice d = res.getDevice(i);
+    if (!matches(d.getName())) continue;
+
+    real = NimBLEDevice::createClient();
+    real->setClientCallbacks(&cliCb, false);
+    if (!real->connect(&d)) {
+      Serial.println("connect failed");
+      NimBLEDevice::deleteClient(real);
+      real = nullptr;
+      continue;
+    }
+    NimBLERemoteService *svc = real->getService(NimBLEUUID(SVC_UUID));
+    if (!svc) {
+      Serial.println("module has no 0xFFE0 service");
+      real->disconnect();
+      continue;
+    }
+    realName = d.getName();
+    realMfg = d.haveManufacturerData() ? d.getManufacturerData() : std::string();
+    Serial.printf("CONNECTED to module '%s' %s\n", realName.c_str(), d.getAddress().toString().c_str());
+
+    for (int i2 = 1; i2 <= NCHAR; i2++) {
+      rc[i2] = svc->getCharacteristic(NimBLEUUID((uint16_t)(SVC_UUID + i2)));
+      if (!rc[i2]) continue;
+      if (rc[i2]->canNotify()) rc[i2]->subscribe(true, onNotify);
+      if (rc[i2]->canRead()) {
+        std::string v = rc[i2]->readValue();
+        cc[i2]->setValue(v);
+      }
+    }
+    realUp = true;
+    needAdvert = true;
+    scan->clearResults();
+    return true;
+  }
+  scan->clearResults();
+  Serial.println("module not found, retrying");
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== Golf cart BMS explorer v2 ===");
-  NimBLEDevice::init("cyd-explorer");
+  Serial.println("\n=== Golf cart BMS proxy logger v3 ===");
+  q = xQueueCreate(24, sizeof(Msg));
+  NimBLEDevice::init("GC2RB-proxy");
+  NimBLEDevice::setMTU(247);
+
+  server = NimBLEDevice::createServer();
+  server->setCallbacks(&srvCb);
+  NimBLEService *svc = server->createService(NimBLEUUID(SVC_UUID));
+  uint32_t props[NCHAR + 1] = {
+      0,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE_NR,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE_NR,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE_NR,
+      NIMBLE_PROPERTY::NOTIFY,
+      NIMBLE_PROPERTY::READ,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR,
+  };
+  for (int i = 1; i <= NCHAR; i++) {
+    cc[i] = svc->createCharacteristic(NimBLEUUID((uint16_t)(SVC_UUID + i)), props[i]);
+    cc[i]->setCallbacks(&charCb);
+    if (props[i] & NIMBLE_PROPERTY::READ) {
+      uint8_t zeros[128] = {0};
+      cc[i]->setValue(zeros, sizeof(zeros));
+    }
+  }
+  svc->start();
 }
 
 void loop() {
-  NimBLEScan *scan = NimBLEDevice::getScan();
-  scan->setActiveScan(true);
-  Serial.printf("\nScanning %us...\n", (unsigned)SCAN_SECONDS);
-  NimBLEScanResults res = scan->start(SCAN_SECONDS, false);
-
-  std::vector<int> order;
-  for (int i = 0; i < res.getCount(); i++) order.push_back(i);
-  std::sort(order.begin(), order.end(),
-            [&](int a, int b) { return res.getDevice(a).getRSSI() > res.getDevice(b).getRSSI(); });
-
-  bool found = false;
-  Serial.printf("Strongest devices (rssi >= %d):\n", SHOW_MIN_RSSI);
-  for (int i : order) {
-    NimBLEAdvertisedDevice d = res.getDevice(i);
-    if (d.getRSSI() < SHOW_MIN_RSSI) break;
-    Serial.printf("  rssi=%d %s type=%d conn=%d name='%s'", d.getRSSI(), d.getAddress().toString().c_str(),
-                  d.getAddress().getType(), d.isConnectable(), d.getName().c_str());
-    for (int s = 0; s < d.getServiceUUIDCount(); s++)
-      Serial.printf(" svc=%s", d.getServiceUUID(s).toString().c_str());
-    if (d.haveManufacturerData()) {
-      std::string m = d.getManufacturerData();
-      Serial.print(" mfg=");
-      printHex((const uint8_t *)m.data(), std::min<size_t>(m.size(), 12));
-    }
-    Serial.println();
-
-    if (matches(d.getName()) && clients.size() < 2) {
-      found = true;
-      NimBLEClient *client = NimBLEDevice::createClient();
-      if (client->connect(&d)) {
-        Serial.printf("CONNECTED to %s\n", d.getName().c_str());
-        dumpAndSubscribe(client);
-        clients.push_back(client);
-      } else {
-        Serial.println("connect failed");
-        NimBLEDevice::deleteClient(client);
-      }
-    }
+  if (!realUp) {
+    if (real && real->isConnected()) real->disconnect();
+    if (phoneUp) server->disconnect(0);
+    connectReal();
+    return;
   }
-  scan->clearResults();
-  if (!found && clients.empty()) Serial.println("NO MATCH for asGC2RB in this scan");
 
-  if (clients.empty()) return;
-  for (int t = 0; t < 600; t++) {
-    delay(100);
-    for (size_t i = 0; i < clients.size();) {
-      if (!clients[i]->isConnected()) {
-        Serial.println("client disconnected");
-        NimBLEDevice::deleteClient(clients[i]);
-        clients.erase(clients.begin() + i);
-      } else i++;
+  if (needAdvert && !phoneUp) {
+    needAdvert = false;
+    startAdvertising();
+  }
+
+  Msg m;
+  while (xQueueReceive(q, &m, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (m.dir == 0) {
+      Serial.printf("[%10lu] APP>MOD ffe%d len=%u: ", millis(), m.idx, (unsigned)m.len);
+      printHex(m.data, m.len);
+      Serial.println();
+      if (rc[m.idx]) rc[m.idx]->writeValue(m.data, m.len, rc[m.idx]->canWrite());
+    } else if (m.dir == 1) {
+      Serial.printf("[%10lu] MOD>APP ffe%d len=%u: ", millis(), m.idx, (unsigned)m.len);
+      printHex(m.data, m.len);
+      Serial.println();
+      if (cc[m.idx]) {
+        cc[m.idx]->setValue(m.data, m.len);
+        cc[m.idx]->notify();
+      }
+    } else {
+      Serial.printf("[%10lu] APP reads ffe%d\n", millis(), m.idx);
     }
   }
 }
