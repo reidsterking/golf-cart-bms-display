@@ -32,6 +32,7 @@ static volatile bool needAdvert = false;
 static volatile bool phoneUp = false;
 static std::string realName;
 static std::string realMfg;
+static std::string clean(std::string s) { s.erase(std::remove(s.begin(), s.end(), '\r'), s.end()); return s; }
 
 static void printHex(const uint8_t *d, size_t n, size_t maxn = 64) {
   for (size_t i = 0; i < n && i < maxn; i++) Serial.printf("%02X ", d[i]);
@@ -102,7 +103,7 @@ static void startAdvertising() {
     adv->setScanResponseData(sr);
   }
   adv->start();
-  Serial.printf("ADVERTISING clone '%s'. Open the official app now.\n", realName.c_str());
+  Serial.printf("ADVERTISING clone '%s'. Open the official app now.\n", clean(realName).c_str());
 }
 
 static bool connectReal() {
@@ -130,7 +131,7 @@ static bool connectReal() {
     }
     realName = d.getName();
     realMfg = d.haveManufacturerData() ? d.getManufacturerData() : std::string();
-    Serial.printf("CONNECTED to module '%s' %s\n", realName.c_str(), d.getAddress().toString().c_str());
+    Serial.printf("CONNECTED to module '%s' %s\n", clean(realName).c_str(), d.getAddress().toString().c_str());
 
     for (int i2 = 1; i2 <= NCHAR; i2++) {
       rc[i2] = svc->getCharacteristic(NimBLEUUID((uint16_t)(SVC_UUID + i2)));
@@ -180,6 +181,7 @@ void setup() {
     }
   }
   svc->start();
+  server->start();  // must happen before any connection exists
 }
 
 void loop() {
