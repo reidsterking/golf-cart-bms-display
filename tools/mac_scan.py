@@ -3,7 +3,9 @@
 
 Used to compare what the real GC2RB module advertises with what the board's
 clone advertises. Run:  python3 tools/mac_scan.py [seconds]
-Needs:  python3 -m pip install --user bleak
+Needs (old system Python 3.9 on macOS, so versions are pinned):
+  python3 -m pip install --user bleak==0.22.3 pyobjc-core==11.1 pyobjc-framework-Cocoa==11.1 \
+      pyobjc-framework-CoreBluetooth==11.1 pyobjc-framework-libdispatch==11.1
 """
 import asyncio
 import sys
