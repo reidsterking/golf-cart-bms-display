@@ -17,7 +17,7 @@ const int W = 320, H = 240;
 const int BAR_H = 28, TAB_H = 30, PAGE_Y = BAR_H, PAGE_H = H - BAR_H - TAB_H;
 const int HIST = 150;
 const int MAX_ALERT_ROWS = 6;
-const int MAX_IDS = 12;
+const int MAX_IDS = 16;
 
 const lv_font_t *F_XS = &lv_font_montserrat_12;
 const lv_font_t *F_SM = &lv_font_montserrat_14;
@@ -32,7 +32,7 @@ struct Card {
 };
 Card cards[2];
 lv_obj_t *pages[3], *tabLabel[3], *tabLine[3];
-lv_obj_t *titleLbl, *bleIcon[2], *chip, *chipLabel;
+lv_obj_t *titleLbl, *bleIcon, *bleTail, *chip, *chipLabel;
 lv_obj_t *sysCaption, *sysAmps, *sysPower, *sysEnergy;
 lv_obj_t *chart, *pwrBig, *pwrSub;
 lv_chart_series_t *series;
@@ -144,12 +144,8 @@ void buildStatusBar(lv_obj_t *scr) {
   chip = box(scr, 120, 4, 100, 20, CARD, 10);
   chipLabel = lbl(chip, 0, 0, F_XS, GOOD, "ALL CLEAR");
   lv_obj_center(chipLabel);
-  for (int i = 0; i < 2; i++) {
-    bleIcon[i] = lbl(scr, 236 + i * 40, 6, F_SM, MUTED, LV_SYMBOL_BLUETOOTH);
-    char n[4];
-    snprintf(n, sizeof n, "%d", i + 1);
-    lbl(scr, 252 + i * 40, 7, F_XS, MUTED, n);
-  }
+  bleIcon = lbl(scr, 236, 6, F_SM, MUTED, LV_SYMBOL_BLUETOOTH);
+  bleTail = lbl(scr, 256, 8, F_XS, MUTED, "");
 }
 
 void buildCard(lv_obj_t *page, int i) {
@@ -306,8 +302,7 @@ void ui_update(const Snapshot &s, const Alerts &al) {
     }
     lv_label_set_text(c.title, buf);
     // Dot: green = live readings, amber = linked but no readings, grey = not connected
-    lv_obj_set_style_bg_color(c.dot, C(b.valid ? GOOD : (b.linked ? WARN : MUTED)), 0);
-    setColor(bleIcon[i], b.linked ? ACCENT : MUTED);
+    lv_obj_set_style_bg_color(c.dot, C(b.valid ? GOOD : (s.linked ? WARN : MUTED)), 0);
 
     if (!b.valid) {
       lv_arc_set_value(c.arc, 0);
@@ -336,6 +331,16 @@ void ui_update(const Snapshot &s, const Alerts &al) {
     totA += b.amps;
     totW += b.volts * b.amps;
     totWh += b.remainingAh * b.volts;
+  }
+
+  // One Bluetooth module serves both batteries
+  setColor(bleIcon, s.linked ? ACCENT : MUTED);
+  if (s.linked && s.module[0]) {
+    char tail[8];
+    last4(s.module, tail, sizeof tail);
+    lv_label_set_text(bleTail, tail);
+  } else {
+    lv_label_set_text(bleTail, "");
   }
 
   // System totals. With no readings they show "--", never zeros that look measured.

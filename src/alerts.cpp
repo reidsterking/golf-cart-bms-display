@@ -11,7 +11,8 @@ const float CURRENT_WARN = 100;
 const uint32_t SHOW_AFTER_MS = 5000;   // condition must hold this long to appear
 const uint32_t CLEAR_AFTER_MS = 10000;  // and be gone this long to disappear
 
-enum Metric { M_SOC, M_HOT, M_COLD_CHARGE, M_CURRENT, M_FULL, M_NODATA, M_COUNT };
+// M_LINK is about the single Bluetooth module, so it only uses battery slot 0.
+enum Metric { M_SOC, M_HOT, M_COLD_CHARGE, M_CURRENT, M_FULL, M_NODATA, M_LINK, M_COUNT };
 
 // Levels: 0 none, 1 info, 2 warn, 3 critical
 struct Slot {
@@ -21,8 +22,11 @@ struct Slot {
 };
 Slot slots[M_COUNT][2];
 
-uint8_t candidate(int m, const Battery &b) {
-  if (m == M_NODATA) return b.valid ? 0 : 2;
+uint8_t candidate(int m, const Snapshot &s, int i) {
+  const Battery &b = s.b[i];
+  bool anyValid = s.b[0].valid || s.b[1].valid;
+  if (m == M_LINK) return (i == 0 && (!s.linked || !anyValid)) ? 2 : 0;
+  if (m == M_NODATA) return (s.linked && anyValid && !b.valid) ? 2 : 0;
   if (!b.valid) return 0;
   switch (m) {
     case M_SOC: return b.soc < SOC_CRIT ? 3 : (b.soc < SOC_WARN ? 2 : 0);
@@ -34,7 +38,8 @@ uint8_t candidate(int m, const Battery &b) {
   return 0;
 }
 
-void describe(int m, int i, uint8_t level, const Battery &b, char *out, size_t n) {
+void describe(int m, int i, uint8_t level, const Snapshot &s, char *out, size_t n) {
+  const Battery &b = s.b[i];
   int id = i + 1;
   switch (m) {
     case M_SOC:
@@ -47,8 +52,9 @@ void describe(int m, int i, uint8_t level, const Battery &b, char *out, size_t n
     case M_COLD_CHARGE: snprintf(out, n, "BAT %d: Charging below freezing", id); break;
     case M_CURRENT: snprintf(out, n, "BAT %d: High current, %.0f A", id, fabsf(b.amps)); break;
     case M_FULL: snprintf(out, n, "BAT %d: Full, unplug the charger", id); break;
-    case M_NODATA:
-      snprintf(out, n, b.linked ? "BAT %d: Linked, no readings yet" : "BAT %d: Module not found", id);
+    case M_NODATA: snprintf(out, n, "BAT %d: No readings", id); break;
+    case M_LINK:
+      snprintf(out, n, "%s", s.linked ? "Module linked, no readings yet" : "Bluetooth module not found");
       break;
   }
 }
@@ -59,7 +65,7 @@ void alerts_eval(const Snapshot &s, Alerts &out, uint32_t nowMs) {
   for (int m = 0; m < M_COUNT; m++) {
     for (int i = 0; i < 2; i++) {
       Slot &sl = slots[m][i];
-      uint8_t cand = candidate(m, s.b[i]);
+      uint8_t cand = candidate(m, s, i);
       if (cand != sl.shown) {
         if (!sl.changing) {
           sl.changing = true;
@@ -83,7 +89,7 @@ void alerts_eval(const Snapshot &s, Alerts &out, uint32_t nowMs) {
         Alert &a = out.items[out.count++];
         a.id = (uint8_t)(m * 2 + i);
         a.sev = (Severity)(level - 1);
-        describe(m, i, level, s.b[i], a.text, sizeof(a.text));
+        describe(m, i, level, s, a.text, sizeof(a.text));
       }
     }
   }

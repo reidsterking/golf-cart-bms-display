@@ -4,8 +4,8 @@
 #include "model.h"
 
 // Fixed presets for screenshots: 0 driving, 1 charging near full,
-// 2 low and hot, 3 battery 2 offline, 4 the real build today
-// (linked, no decoder yet).
+// 2 low and hot, 3 battery 2 sends nothing, 4 the real build today
+// (module linked, no decoder yet), 5 module not found.
 void sim_scenario(Snapshot &s, int id);
 
 // Continuously changing demo data for running on the device.

@@ -1,8 +1,9 @@
-// Live data source: connects to the two battery Bluetooth modules (name contains
-// "GC2RB") and fills a Snapshot with whatever it can decode.
+// Live data source: connects to the single battery Bluetooth module (name
+// contains "GC2RB"), which serves both batteries, and fills a Snapshot with
+// whatever it can decode.
 //
 // Read-only: it subscribes to the module's notification characteristic and never
-// writes to the modules. Until the protocol decoder exists, batteries show as
+// writes to the module. Until the protocol decoder exists, the module shows as
 // "linked, no readings" and every raw notification is printed to serial.
 #pragma once
 #include "model.h"

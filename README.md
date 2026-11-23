@@ -1,7 +1,7 @@
 # Golf Cart BMS Display
 
 Dashboard for two 48 V Epoch GC2 batteries on an ESP32 "Cheap Yellow Display" (ESP32-2432S028R, 320x240 touch).
-The batteries' Bluetooth modules advertise as `GC2RB<serial>`.
+One Bluetooth module (advertises as `GC2RB<number>`) serves both batteries.
 
 ## Status
 
@@ -9,7 +9,7 @@ The batteries' Bluetooth modules advertise as `GC2RB<serial>`.
 | --- | --- |
 | Dashboard UI (overview, power graph, alerts) | Built, verified in the desktop renderer and compiles for the board. Not yet run on hardware. |
 | Alert engine (debounced, hysteresis) | Built, placeholder thresholds |
-| Bluetooth link to both modules | Built (read-only, remembers which serial is battery 1 and 2). Not yet run on hardware inside the dashboard. |
+| Bluetooth link to the module | Built (read-only). Not yet run on hardware inside the dashboard. |
 | Decoding battery readings | Blocked: the module only answers after the official app sends a request, and that request is not known yet. The default build therefore shows `--` and "no readings" alerts, never fake numbers. |
 
 ## Environments
@@ -33,6 +33,7 @@ pio run -e native && mkdir -p sim/out && .pio/build/native/program sim/out && py
 - `src/ui/` LVGL dashboard
 - `src/alerts.cpp` alert rules
 - `src/sim_source.cpp` simulated data, to be replaced by the Bluetooth source
+- `src/ble_source.cpp` live source: one link to the module, decoder still a stub
 - `tools/proxy/` BLE man-in-the-middle logger used to learn the module protocol
 - `docs/screens/` screenshots
 

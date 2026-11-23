@@ -1,7 +1,6 @@
 #include "ble_source.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
-#include <Preferences.h>
 #include <ctype.h>
 #include <string.h>
 
@@ -13,19 +12,17 @@ const uint32_t STALE_MS = 10000;  // readings older than this are treated as los
 
 SemaphoreHandle_t mtx;
 Snapshot snap;
-uint32_t lastData[2] = {0, 0};
-NimBLEClient *cl[2] = {nullptr, nullptr};
-volatile bool linkedFlag[2] = {false, false};
-Preferences prefs;
+uint32_t lastData = 0;
+NimBLEClient *client = nullptr;
+volatile bool linkedFlag = false;
 
-// TODO(protocol): decode a notification from battery `slot` into `b`.
-// Return true only when the packet really contained readings. The module's
-// protocol is not known yet, so this must not invent values.
-bool decode(int slot, const uint8_t *data, size_t len, Battery &b) {
-  (void)slot;
+// TODO(protocol): decode one notification from the module into the snapshot's
+// two batteries (s.b[0], s.b[1]). Return true only when the packet really
+// contained readings. The protocol is not known yet, so this must not invent values.
+bool decode(const uint8_t *data, size_t len, Snapshot &s) {
   (void)data;
   (void)len;
-  (void)b;
+  (void)s;
   return false;
 }
 
@@ -46,76 +43,58 @@ bool isModule(const std::string &name) {
   return l.find("gc2rb") != std::string::npos;
 }
 
-// Which dashboard slot (battery 1 or 2) a module belongs to. Remembered across
-// reboots so BAT 1 and BAT 2 never swap.
-int slotFor(const char *serial) {
-  lock();
-  int slot = -1;
-  for (int i = 0; i < 2; i++) {
-    if (strcmp(snap.b[i].serial, serial) == 0) slot = i;
-  }
-  if (slot < 0) {
-    for (int i = 0; i < 2; i++) {
-      if (snap.b[i].serial[0] == 0) {
-        slot = i;
-        strncpy(snap.b[i].serial, serial, sizeof(snap.b[i].serial) - 1);
-        prefs.putString(i ? "s1" : "s0", serial);
-        break;
-      }
-    }
-  }
-  unlock();
-  return slot;
-}
-
-class SlotCb : public NimBLEClientCallbacks {
- public:
-  explicit SlotCb(int s) : slot(s) {}
-  void onDisconnect(NimBLEClient *) override { linkedFlag[slot] = false; }
-  int slot;
+class LinkCb : public NimBLEClientCallbacks {
+  void onDisconnect(NimBLEClient *) override { linkedFlag = false; }
 };
-SlotCb slotCb[2] = {SlotCb(0), SlotCb(1)};
+LinkCb linkCb;
 
-void onNotify(int slot, uint8_t *d, size_t n) {
-  Serial.printf("[%10lu] BAT%d NOTIFY len=%u: ", millis(), slot + 1, (unsigned)n);
+void onNotify(uint8_t *d, size_t n) {
+  Serial.printf("[%10lu] NOTIFY len=%u: ", millis(), (unsigned)n);
   for (size_t i = 0; i < n && i < 64; i++) Serial.printf("%02X ", d[i]);
   Serial.println();
 
   lock();
-  Battery b = snap.b[slot];
+  Snapshot copy = snap;
   unlock();
-  if (decode(slot, d, n, b)) {
+  if (decode(d, n, copy)) {
     lock();
-    snap.b[slot] = b;
-    snap.b[slot].valid = true;
-    snap.b[slot].linked = true;
-    lastData[slot] = millis();
+    snap.b[0] = copy.b[0];
+    snap.b[1] = copy.b[1];
+    snap.b[0].valid = copy.b[0].valid;
+    snap.b[1].valid = copy.b[1].valid;
+    lastData = millis();
     unlock();
   }
 }
 
-void connectSlot(int slot, NimBLEAdvertisedDevice &d) {
-  if (cl[slot]) {
-    NimBLEDevice::deleteClient(cl[slot]);
-    cl[slot] = nullptr;
+bool connectModule(NimBLEAdvertisedDevice &d) {
+  if (client) {
+    NimBLEDevice::deleteClient(client);
+    client = nullptr;
   }
   NimBLEClient *c = NimBLEDevice::createClient();
-  c->setClientCallbacks(&slotCb[slot], false);
+  c->setClientCallbacks(&linkCb, false);
   if (!c->connect(&d)) {
     NimBLEDevice::deleteClient(c);
-    return;
+    return false;
   }
   NimBLERemoteService *svc = c->getService(NimBLEUUID(SVC_UUID));
   NimBLERemoteCharacteristic *ch = svc ? svc->getCharacteristic(NimBLEUUID(NOTIFY_UUID)) : nullptr;
   if (!ch || !ch->canNotify()) {
     c->disconnect();
     NimBLEDevice::deleteClient(c);
-    return;
+    return false;
   }
-  ch->subscribe(true, [slot](NimBLERemoteCharacteristic *, uint8_t *d2, size_t n, bool) { onNotify(slot, d2, n); });
-  cl[slot] = c;
-  linkedFlag[slot] = true;
-  Serial.printf("BAT%d linked: %s\n", slot + 1, snap.b[slot].serial);
+  ch->subscribe(true, [](NimBLERemoteCharacteristic *, uint8_t *d2, size_t n, bool) { onNotify(d2, n); });
+  client = c;
+  linkedFlag = true;
+  char name[16];
+  sanitize(d.getName(), name, sizeof name);
+  lock();
+  strncpy(snap.module, name, sizeof(snap.module) - 1);
+  unlock();
+  Serial.printf("Module linked: %s\n", name);
+  return true;
 }
 
 void bleTask(void *) {
@@ -124,30 +103,22 @@ void bleTask(void *) {
   scan->setActiveScan(true);
 
   for (;;) {
-    for (int i = 0; i < 2; i++) {
-      if (cl[i] && !cl[i]->isConnected()) linkedFlag[i] = false;
-    }
-    bool needScan = !linkedFlag[0] || !linkedFlag[1];
-    if (needScan) {
+    if (client && !client->isConnected()) linkedFlag = false;
+    if (!linkedFlag) {
       NimBLEScanResults res = scan->start(4, false);
       for (int j = 0; j < res.getCount(); j++) {
         NimBLEAdvertisedDevice d = res.getDevice(j);
-        if (!isModule(d.getName())) continue;
-        char serial[16];
-        sanitize(d.getName(), serial, sizeof serial);
-        int slot = slotFor(serial);
-        if (slot < 0 || linkedFlag[slot]) continue;
-        connectSlot(slot, d);
+        if (isModule(d.getName()) && connectModule(d)) break;
       }
       scan->clearResults();
     }
     lock();
-    for (int i = 0; i < 2; i++) {
-      snap.b[i].linked = linkedFlag[i];
-      if (!linkedFlag[i]) snap.b[i].valid = false;
+    snap.linked = linkedFlag;
+    if (!linkedFlag) {
+      snap.b[0].valid = snap.b[1].valid = false;
     }
     unlock();
-    vTaskDelay(pdMS_TO_TICKS(needScan ? 500 : 2000));
+    vTaskDelay(pdMS_TO_TICKS(linkedFlag ? 2000 : 500));
   }
 }
 
@@ -155,19 +126,13 @@ void bleTask(void *) {
 
 void ble_start() {
   mtx = xSemaphoreCreateMutex();
-  prefs.begin("cart", false);
-  String s0 = prefs.getString("s0", ""), s1 = prefs.getString("s1", "");
-  strncpy(snap.b[0].serial, s0.c_str(), sizeof(snap.b[0].serial) - 1);
-  strncpy(snap.b[1].serial, s1.c_str(), sizeof(snap.b[1].serial) - 1);
   xTaskCreatePinnedToCore(bleTask, "ble", 8192, nullptr, 1, nullptr, 0);
 }
 
 void ble_snapshot(Snapshot &out) {
   lock();
   out = snap;
-  for (int i = 0; i < 2; i++) {
-    if (out.b[i].valid && millis() - lastData[i] > STALE_MS) out.b[i].valid = false;
-  }
+  if (millis() - lastData > STALE_MS) out.b[0].valid = out.b[1].valid = false;
   unlock();
   out.demo = false;
 }

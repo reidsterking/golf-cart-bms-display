@@ -51,10 +51,10 @@ int main(int argc, char **argv) {
   lv_disp_drv_register(&drv);
   ui_init();
 
-  const char *names[] = {"driving", "charging", "alarm", "offline", "realnow"};
+  const char *names[] = {"driving", "charging", "alarm", "offline", "realnow", "notfound"};
   const char *pages[] = {"overview", "power", "alerts"};
   uint32_t now = 1000;
-  for (int sc = 0; sc < 5; sc++) {
+  for (int sc = 0; sc < 6; sc++) {
     Snapshot s;
     sim_scenario(s, sc);
     Alerts al;

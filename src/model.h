@@ -5,9 +5,8 @@
 #include <stdint.h>
 
 struct Battery {
-  bool linked = false;  // Bluetooth connection to this battery's module is up
   bool valid = false;   // fresh, decoded readings are available
-  char serial[16] = {0};  // module name, e.g. "GC2RB48300087"
+  char serial[16] = {0};  // the battery's own number, read from the module (unknown until decoded)
   float volts = 0;
   float amps = 0;  // positive = discharging (cart is drawing), negative = charging
   float soc = 0;   // state of charge, percent
@@ -16,9 +15,12 @@ struct Battery {
   float capacityAh = 30;  // placeholder until read from the module
 };
 
+// One Bluetooth module serves both batteries.
 struct Snapshot {
   Battery b[2];
-  bool demo = false;  // true only for the simulator build
+  bool linked = false;     // Bluetooth connection to the module is up
+  char module[16] = {0};   // module name, e.g. "GC2RB48300087"
+  bool demo = false;       // true only for the simulator build
 };
 
 enum Severity : uint8_t { SEV_INFO = 0, SEV_WARN = 1, SEV_CRIT = 2 };
