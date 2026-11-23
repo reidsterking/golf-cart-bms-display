@@ -1,92 +1,103 @@
-// Phase 1: BLE protocol explorer.
-// Finds the battery Bluetooth modules (name starts with "asGC2RB"), connects,
-// prints every service and characteristic, and logs all notifications as hex.
-// Capture the serial output and use it to write the real decoder.
+// BLE protocol explorer. Lists the strongest nearby devices with full advertising
+// details, and connects to any whose name contains one of the match strings.
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <algorithm>
 #include <vector>
 
-static const char *TARGET_PREFIX = "asGC2RB";
+static const char *MATCHES[] = {"asgc2rb", "gc2rb"};  // lower case, substring match
 static const uint32_t SCAN_SECONDS = 10;
-
+static const int SHOW_MIN_RSSI = -85;
 static std::vector<NimBLEClient *> clients;
 
-static void printHex(const uint8_t *data, size_t len) {
-  for (size_t i = 0; i < len; i++) Serial.printf("%02X ", data[i]);
+static void printHex(const uint8_t *d, size_t n) {
+  for (size_t i = 0; i < n; i++) Serial.printf("%02X ", d[i]);
 }
 
-static void onNotify(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len, bool isNotify) {
+static void onNotify(NimBLERemoteCharacteristic *c, uint8_t *d, size_t n, bool notify) {
   Serial.printf("[%10lu] %s %s %s len=%u: ", millis(),
-                chr->getRemoteService()->getClient()->getPeerAddress().toString().c_str(),
-                isNotify ? "NOTIFY" : "INDICATE", chr->getUUID().toString().c_str(), (unsigned)len);
-  printHex(data, len);
+                c->getRemoteService()->getClient()->getPeerAddress().toString().c_str(),
+                notify ? "NOTIFY" : "INDICATE", c->getUUID().toString().c_str(), (unsigned)n);
+  printHex(d, n);
   Serial.println();
 }
 
 static void dumpAndSubscribe(NimBLEClient *client) {
-  auto *services = client->getServices(true);
-  for (auto *svc : *services) {
+  for (auto *svc : *client->getServices(true)) {
     Serial.printf("  SERVICE %s\n", svc->getUUID().toString().c_str());
-    auto *chars = svc->getCharacteristics(true);
-    for (auto *chr : *chars) {
-      Serial.printf("    CHAR %s props:%s%s%s%s%s\n", chr->getUUID().toString().c_str(),
-                    chr->canRead() ? " read" : "", chr->canWrite() ? " write" : "",
-                    chr->canWriteNoResponse() ? " writeNR" : "", chr->canNotify() ? " notify" : "",
-                    chr->canIndicate() ? " indicate" : "");
-      if (chr->canRead()) {
-        std::string v = chr->readValue();
+    for (auto *c : *svc->getCharacteristics(true)) {
+      Serial.printf("    CHAR %s props:%s%s%s%s%s\n", c->getUUID().toString().c_str(),
+                    c->canRead() ? " read" : "", c->canWrite() ? " write" : "",
+                    c->canWriteNoResponse() ? " writeNR" : "", c->canNotify() ? " notify" : "",
+                    c->canIndicate() ? " indicate" : "");
+      if (c->canRead()) {
+        std::string v = c->readValue();
         Serial.print("      value: ");
         printHex((const uint8_t *)v.data(), v.size());
         Serial.println();
       }
-      if (chr->canNotify() || chr->canIndicate()) {
-        chr->subscribe(chr->canNotify(), onNotify);
-      }
+      if (c->canNotify() || c->canIndicate()) c->subscribe(c->canNotify(), onNotify);
     }
   }
 }
 
-static bool nameMatches(const std::string &name) {
-  return name.rfind(TARGET_PREFIX, 0) == 0;
+static bool matches(std::string name) {
+  std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+  for (auto *m : MATCHES) if (name.find(m) != std::string::npos) return true;
+  return false;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== Golf cart BMS explorer ===");
+  Serial.println("\n=== Golf cart BMS explorer v2 ===");
   NimBLEDevice::init("cyd-explorer");
 }
 
 void loop() {
-  Serial.printf("Scanning %us for '%s*'...\n", (unsigned)SCAN_SECONDS, TARGET_PREFIX);
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
-  NimBLEScanResults results = scan->start(SCAN_SECONDS, false);
+  Serial.printf("\nScanning %us...\n", (unsigned)SCAN_SECONDS);
+  NimBLEScanResults res = scan->start(SCAN_SECONDS, false);
 
-  for (int i = 0; i < results.getCount(); i++) {
-    NimBLEAdvertisedDevice dev = results.getDevice(i);
-    Serial.printf("  seen: '%s' %s rssi=%d\n", dev.getName().c_str(),
-                  dev.getAddress().toString().c_str(), dev.getRSSI());
-    if (!nameMatches(dev.getName())) continue;
-    if (clients.size() >= 2) continue;
+  std::vector<int> order;
+  for (int i = 0; i < res.getCount(); i++) order.push_back(i);
+  std::sort(order.begin(), order.end(),
+            [&](int a, int b) { return res.getDevice(a).getRSSI() > res.getDevice(b).getRSSI(); });
 
-    NimBLEClient *client = NimBLEDevice::createClient();
-    if (client->connect(&dev)) {
-      Serial.printf("CONNECTED to %s (%s)\n", dev.getName().c_str(), dev.getAddress().toString().c_str());
-      dumpAndSubscribe(client);
-      clients.push_back(client);
-    } else {
-      Serial.println("connect failed");
-      NimBLEDevice::deleteClient(client);
+  bool found = false;
+  Serial.printf("Strongest devices (rssi >= %d):\n", SHOW_MIN_RSSI);
+  for (int i : order) {
+    NimBLEAdvertisedDevice d = res.getDevice(i);
+    if (d.getRSSI() < SHOW_MIN_RSSI) break;
+    Serial.printf("  rssi=%d %s type=%d conn=%d name='%s'", d.getRSSI(), d.getAddress().toString().c_str(),
+                  d.getAddress().getType(), d.isConnectable(), d.getName().c_str());
+    for (int s = 0; s < d.getServiceUUIDCount(); s++)
+      Serial.printf(" svc=%s", d.getServiceUUID(s).toString().c_str());
+    if (d.haveManufacturerData()) {
+      std::string m = d.getManufacturerData();
+      Serial.print(" mfg=");
+      printHex((const uint8_t *)m.data(), std::min<size_t>(m.size(), 12));
+    }
+    Serial.println();
+
+    if (matches(d.getName()) && clients.size() < 2) {
+      found = true;
+      NimBLEClient *client = NimBLEDevice::createClient();
+      if (client->connect(&d)) {
+        Serial.printf("CONNECTED to %s\n", d.getName().c_str());
+        dumpAndSubscribe(client);
+        clients.push_back(client);
+      } else {
+        Serial.println("connect failed");
+        NimBLEDevice::deleteClient(client);
+      }
     }
   }
   scan->clearResults();
+  if (!found && clients.empty()) Serial.println("NO MATCH for asGC2RB in this scan");
 
-  if (clients.empty()) {
-    delay(2000);
-    return;
-  }
-  // Stay connected and log notifications. Drop dead clients so we rescan.
+  if (clients.empty()) return;
   for (int t = 0; t < 600; t++) {
     delay(100);
     for (size_t i = 0; i < clients.size();) {
@@ -94,9 +105,7 @@ void loop() {
         Serial.println("client disconnected");
         NimBLEDevice::deleteClient(clients[i]);
         clients.erase(clients.begin() + i);
-      } else {
-        i++;
-      }
+      } else i++;
     }
   }
 }
