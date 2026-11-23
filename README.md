@@ -1,23 +1,39 @@
 # Golf Cart BMS Display
 
-ESP32 "Cheap Yellow Display" dashboard for two 48 V Epoch G2C batteries, read over their Bluetooth modules (BLE name prefix `asGC2RB`).
+Dashboard for two 48 V Epoch GC2 batteries on an ESP32 "Cheap Yellow Display" (ESP32-2432S028R, 320x240 touch).
+The batteries' Bluetooth modules advertise as `GC2RB<serial>`.
 
-## Phase 1: protocol explorer (current)
+## Status
 
-`src/main.cpp` scans for `asGC2RB*` modules, connects to up to two, prints every service and characteristic, and logs all notifications as hex.
+| Part | State |
+| --- | --- |
+| Dashboard UI (overview, power graph, alerts) | Built, verified in the desktop renderer and compiles for the board. Not yet run on hardware. |
+| Alert engine (debounced, hysteresis) | Built, placeholder thresholds |
+| Battery data over Bluetooth | Blocked: the module only answers after the official app sends a request, and that request is not known yet. The dashboard currently runs on simulated data. |
+
+## Environments
 
 ```bash
-pio run -t upload
-pio device monitor
+pio run -e cyd -t upload     # dashboard on the board (simulated data for now)
+pio run -e proxy -t upload   # BLE protocol logger, see tools/proxy
+pio run -e native            # desktop build that renders the UI to images
 ```
 
-Close the battery's phone app first. Many BLE modules accept only one connection.
+Render screenshots:
 
-Save the serial output. It is the input for the real decoder.
+```bash
+pio run -e native && mkdir -p sim/out && .pio/build/native/program sim/out && python3 sim/ppm2png.py sim/out 3
+```
 
-## Roadmap
+## Layout
 
-1. Protocol discovery (this phase)
-2. Decoder with host-side unit tests (`pio test -e native`)
-3. Touch UI: per-battery charge, pack current, remaining capacity, temperature, warnings
-4. Charge-state alerts
+- `src/model.h` data model; the only thing the UI depends on
+- `src/ui/` LVGL dashboard
+- `src/alerts.cpp` alert rules
+- `src/sim_source.cpp` simulated data, to be replaced by the Bluetooth source
+- `tools/proxy/` BLE man-in-the-middle logger used to learn the module protocol
+- `docs/screens/` screenshots
+
+## Board notes
+
+If colors look inverted, build with `-DCYD_INVERT=1`. If touches land in the wrong place, adjust the `TOUCH_*` constants at the top of `src/main.cpp`.
